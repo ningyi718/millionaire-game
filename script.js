@@ -371,6 +371,7 @@ function reset() {
   $('roundModal').classList.add('hidden');
   $('bonusModal').classList.add('hidden');
   $('dealModal').classList.add('hidden');
+  $('resultModal').classList.add('hidden');
   $('loginModal').classList.remove('hidden');
   $('startBtn').disabled = false;
   $('startBtn').style.opacity = '1';
