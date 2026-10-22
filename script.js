@@ -25,11 +25,14 @@ let timerId = null;
 let bankerThinkId = null;
 let bonusQueue = [];
 let bonusShowing = false;
+let paidGroupBonus = 0;
+let bonusOfferDelayId = null;
 let consecutiveNoDeals = 0;
 let currentPlayerName = '';
 const players = new Map();
 let roundModalPending = false;
 let offerPending = false;
+let revealPending = false;
 let unlockedGroups = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -57,7 +60,19 @@ function loginPlayer() {
 }
 
 function switchPlayer() {
+  // 最终开箱后也必须先结束当前局，否则 active 会阻止切换参赛者。
   if (currentPlayerName && active) return;
+  clearInterval(timerId);
+  clearTimeout(bankerThinkId);
+  clearTimeout(bonusOfferDelayId);
+  active = false;
+  offerPending = false;
+  roundModalPending = false;
+  bonusShowing = false;
+  $('roundModal').classList.add('hidden');
+  $('bonusModal').classList.add('hidden');
+  $('dealModal').classList.add('hidden');
+  $('revealModal').classList.add('hidden');
   if (currentPlayerName) players.set(currentPlayerName, balance);
   renderScoreboard();
   $('resultModal').classList.add('hidden');
@@ -163,6 +178,7 @@ function startGame() {
   groupBonus = 0;
   bonusQueue = [];
   bonusShowing = false;
+  paidGroupBonus = 0;
   consecutiveNoDeals = 0;
   currentOffer = 0;
   $('startBtn').disabled = true;
@@ -190,13 +206,17 @@ function selectCase(button) {
 }
 
 function openCase(button) {
-  if (!active || playerCase === null || offerPending || getRoundOpenedCount() >= getRoundTarget() || button.classList.contains('owned') || button.classList.contains('opened')) return;
+  if (!active || playerCase === null || offerPending || revealPending || getRoundOpenedCount() >= getRoundTarget() || button.classList.contains('owned') || button.classList.contains('opened')) return;
   const value = Number(button.dataset.value);
   const valueIndex = remainingValues.indexOf(value);
   const openedValue = valueIndex >= 0 ? remainingValues.splice(valueIndex, 1)[0] : remainingValues.shift();
   openedValues.push(openedValue);
   openedCount += 1;
   totalOpenedCount += 1;
+  const roundComplete = getRoundOpenedCount() >= getRoundTarget();
+  if (roundComplete && totalOpenedCount < CASE_VALUES.length - 1) {
+    revealPending = true;
+  }
   button.classList.add('opened', 'disabled');
   button.innerHTML = `<span class="case-number">OPENED</span><span class="case-value">${money(openedValue)}</span>`;
   button.disabled = true;
@@ -205,11 +225,22 @@ function openCase(button) {
     boardItem.classList.add('revealed');
     checkGroupUnlock(Number(boardItem.dataset.group));
   }
-  const roundComplete = getRoundOpenedCount() >= getRoundTarget();
   showMessage(`已开出 ${money(openedValue)}。${roundComplete ? '本轮已开完，资本家正在准备报价……' : `本轮还可开 ${getRoundTarget() - getRoundOpenedCount()} 个箱子。`}`, openedValue > 100000 ? 'loss' : '');
   updateStats();
   if (totalOpenedCount >= CASE_VALUES.length - 1) finishGame();
-  else if (roundComplete) showOffer();
+  else if (roundComplete) {
+    revealPending = true;
+    $('revealModal').classList.remove('hidden');
+    setTimeout(() => {
+      revealPending = false;
+      $('revealModal').classList.add('hidden');
+      if (bonusQueue.length > 0) {
+        showNextBonus();
+      } else if (!bonusShowing) {
+        showOffer();
+      }
+    }, 5000);
+  }
 }
 
 function checkGroupUnlock(groupNumber) {
@@ -219,9 +250,13 @@ function checkGroupUnlock(groupNumber) {
   unlockedGroups.add(groupNumber);
   const reward = GROUP_REWARDS[groupNumber - 1];
   groupBonus += reward;
+  paidGroupBonus += reward;
+  balance += reward;
+  saveCurrentPlayer();
+  updateStats();
   bonusQueue.push({ groupNumber, reward });
-  showMessage(`第 ${groupNumber} 组金额阶梯已全部开出，组奖励已锁定，将在本局结算时发放。`, 'win');
-  showNextBonus();
+  showMessage(`第 ${groupNumber} 组金额阶梯已全部开出，奖励 ${money(reward)} 已发放到账户余额。`, 'win');
+  if (!revealPending) showNextBonus();
 }
 
 function addGroupBonus() {
@@ -234,7 +269,7 @@ function showNextBonus() {
   const bonus = bonusQueue.shift();
   $('bonusTitle').textContent = `第 ${bonus.groupNumber} 组奖励解锁！`;
   $('bonusAmount').textContent = money(bonus.reward);
-  $('bonusText').textContent = `本组金额阶梯已全部开出，奖励 ${money(bonus.reward)} 已锁定，将在本局结算时发放。点击继续后，资本家将思考 3 秒并开价。`;
+  $('bonusText').textContent = `本组金额阶梯已全部开出，奖励 ${money(bonus.reward)} 已发放到账户余额。庆祝完成后，资本家会等待 3 秒再决定是否报价。`;
   $('bonusModal').classList.remove('hidden');
 }
 
@@ -290,6 +325,7 @@ function startTimer() {
 function noDeal() {
   clearInterval(timerId);
   clearTimeout(bankerThinkId);
+  clearTimeout(bonusOfferDelayId);
   offerPending = false;
   $('dealModal').classList.add('hidden');
   consecutiveNoDeals += 1;
@@ -312,9 +348,10 @@ function beginRound() {
 function acceptDeal() {
   clearInterval(timerId);
   clearTimeout(bankerThinkId);
+  clearTimeout(bonusOfferDelayId);
   offerPending = false;
   $('dealModal').classList.add('hidden');
-  balance += currentOffer + groupBonus;
+  balance += currentOffer + (groupBonus - paidGroupBonus);
   active = false;
   saveCurrentPlayer();
   $('startBtn').disabled = false;
@@ -322,7 +359,7 @@ function acceptDeal() {
   $('resultTitle').textContent = currentOffer + groupBonus > ENTRY_FEE ? 'DEAL！盈利离场' : currentOffer + groupBonus === ENTRY_FEE ? 'DEAL！保本离场' : 'DEAL！亏损离场';
   const dealTotal = currentOffer + groupBonus;
   const dealNet = dealTotal - ENTRY_FEE;
-  $('resultText').textContent = `报价 ${money(currentOffer)} + 组奖励 ${money(groupBonus)} = 带走 ${money(dealTotal)}。${dealNet >= 0 ? '净收益' : '净亏损'} ${money(Math.abs(dealNet))}，${dealNet >= 0 ? '未亏损' : '本局亏损'}。`;
+  $('resultText').textContent = `你选择的箱子金额是 ${money(playerCase)}。报价 ${money(currentOffer)} + 组奖励 ${money(groupBonus)} = 带走 ${money(dealTotal)}。${dealNet >= 0 ? '净收益' : '净亏损'} ${money(Math.abs(dealNet))}，${dealNet >= 0 ? '未亏损' : '本局亏损'}。`;
   $('resultModal').classList.remove('hidden');
   updateStats();
   renderScoreboard();
@@ -330,8 +367,13 @@ function acceptDeal() {
 
 function finishGame() {
   const finalTotal = playerCase + groupBonus;
-  balance += finalTotal;
+  balance += finalTotal - paidGroupBonus;
   const finalNet = finalTotal - ENTRY_FEE;
+  active = false;
+  clearInterval(timerId);
+  clearTimeout(bankerThinkId);
+  clearTimeout(bonusOfferDelayId);
+  offerPending = false;
   saveCurrentPlayer();
   $('startBtn').disabled = false;
   $('startBtn').style.opacity = '1';
@@ -366,11 +408,16 @@ function reset() {
   roundIndex = 0;
   bonusQueue = [];
   bonusShowing = false;
+  clearTimeout(bonusOfferDelayId);
+  bonusOfferDelayId = null;
+  paidGroupBonus = 0;
   offerPending = false;
+  revealPending = false;
   unlockedGroups = new Set();
   $('roundModal').classList.add('hidden');
   $('bonusModal').classList.add('hidden');
   $('dealModal').classList.add('hidden');
+  $('revealModal').classList.add('hidden');
   $('resultModal').classList.add('hidden');
   $('loginModal').classList.remove('hidden');
   $('startBtn').disabled = false;
@@ -397,8 +444,20 @@ $('bonusBtn').addEventListener('click', () => {
   if (bonusQueue.length > 0) {
     showNextBonus();
   } else if (active && getRoundOpenedCount() >= getRoundTarget()) {
-    showOffer();
+    const bonusBtn = $('bonusBtn');
+    bonusBtn.disabled = true;
+    bonusBtn.textContent = '资本家准备报价…';
+    showMessage('庆祝完成，资本家将在 3 秒后报价。', 'win');
+    bonusOfferDelayId = setTimeout(() => {
+      bonusBtn.disabled = false;
+      bonusBtn.innerHTML = '庆祝完成，继续 <span>→</span>';
+      bonusOfferDelayId = null;
+      if (active && getRoundOpenedCount() >= getRoundTarget()) showOffer();
+    }, 3000);
   } else if (active) {
+    const bonusBtn = $('bonusBtn');
+    bonusBtn.disabled = false;
+    bonusBtn.innerHTML = '庆祝完成，继续 <span>→</span>';
     showMessage(`组奖励已领取，继续选择本轮剩余的 ${getRoundTarget() - getRoundOpenedCount()} 个箱子。`, 'win');
   }
 });
